@@ -2,12 +2,6 @@
 //  EcoSim – systems.pde
 //  LifecycleSystem: per-creature randomised stats, energy,
 //  reproduction readiness, and death.
-//
-//  Top-level helpers (outside the class – Processing requires
-//  this for functions that call random() and need to be shared):
-//    crossbreed()  – builds a child LifecycleSystem from two parents
-//    lcAvg()       – averages two floats
-//    lcRandMut()   – returns a mutation multiplier near 1.0
 // ============================================================
 
 class LifecycleSystem {
@@ -45,7 +39,7 @@ class LifecycleSystem {
     reproductionCost      = 25;   // energy spent per parent on birth
     mateRange             = 2.25;  // world-units
 
-    energy = constrain(initEnergy, maxEnergy*3/4, maxEnergy);
+    energy = initEnergy;
   }
 
   // ── Explicit constructor (used by crossbreed()) ───────────────

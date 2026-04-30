@@ -2,33 +2,32 @@
 //  EcoSim – world.pde
 //  World: entity collections, update loop, rendering helpers,
 //  reproduction, population graph, HUD.
-//
-//  CHANGES FROM ORIGINAL:
-//   - findNearestReadyMate(): finds a same-species creature that
-//     also has enough energy to mate, excluding self.
-//   - spawnOffspring(): deducts reproductionCost from both
-//     parents, crossbreeds their LifecycleSystems, and inserts
-//     the child into the appropriate list. Births are capped so
-//     the simulation doesn't explode.
-//   - Dead creatures are pruned after exceeding MAX_CORPSES so
-//     memory doesn't grow unbounded.
-//   - Population history tracked for a scrolling side graph.
-//   - HUD extended: shows per-stat averages and birth counts.
-//   - handleKey() renamed from handleKeyPressed() to match
-//     original; alias kept for compatibility.
 // ============================================================
 
 // ── Global population caps ────────────────────────────────────
-final int MAX_HERBIVORES = 80;
-final int MAX_CARNIVORES = 40;
-final int MAX_CORPSES    = 30;   // dead creatures kept for inspection
-final int GRAPH_HISTORY  = 300;  // frames of pop history to display
+final int MAX_HERBIVORES = 120;
+final int MAX_CARNIVORES = 50;   // combined across both lairs
+final int MAX_CORPSES    = 30;
+final int GRAPH_HISTORY  = 300;
 
-// Terrain type constants
+// Herbivore edge-spawn threshold
+final int HERB_SPAWN_THRESHOLD = 30;  // below this, edges start spawning
+
+// Terrain type constants (must stay accessible to all .pde files)
 final int GRASSLAND = 0;
-final int BRUSH = 1;
-final int WATER = 2;
-final int ROCK = 3;
+final int BRUSH     = 1;
+final int WATER     = 2;
+final int ROCK      = 3;
+
+// ── Lair hibernate / roam parameters ─────────────────────────
+// Predators return to lair when energy > this fraction of maxEnergy
+final float HIBERNATE_RETURN_THRESHOLD = 0.85;
+// They hibernate until energy drops to this fraction
+final float HIBERNATE_EXIT_THRESHOLD   = 0.45;
+// Roam radius at HIBERNATE_EXIT_THRESHOLD energy (world units)
+final float ROAM_RADIUS_MIN  = 20;
+// Roam radius when nearly dead (energy → 0)
+final float ROAM_RADIUS_MAX  = 80;
 
 class World {
   int worldWidth;
@@ -36,49 +35,62 @@ class World {
   PVector worldSize;
   int gridSize;
 
-  int[][] terrain;  // terrain grid = every cell has a biome type
+  int[][] terrain;
 
   ArrayList<Creature> herbivores;
   ArrayList<Creature> carnivores;
   ArrayList<PVector>  plants;
   Camera camera;
 
-  boolean showRanges  = false;
-  boolean paused      = false;
+  boolean showRanges = false;
+  boolean paused     = false;
 
   // terrain palette
-  color grassColor = color(134, 180, 80);
-  color brushColor = color(107, 142, 60);
-  color waterColor = color(70, 130, 180);
+  color grassColor = color(134, 180,  80);
+  color brushColor = color(107, 142,  60);
+  color waterColor = color( 70, 130, 180);
   color rockColor  = color(160, 145, 120);
 
-  // plant regrowth settings
-  int   plantCap       = 60;   // max plants that can exist at once
-  int   regrowInterval = 120;  // every N frames
+  // ── Two lairs ─────────────────────────────────────────────────
+  PVector[] lairCenters;
+  float lairRadius         = 18;
+  float lairRestRadius     = 10;
+  int   maxLairResidents   = 5;
+
+  // Allegiance colours: [lair0, lair1] – low-energy / high-energy pair
+  color[] lairColorLow  = { color(100, 30, 30),  color(120, 80, 30)  };
+  color[] lairColorHigh = { color(230, 80, 80),  color(230, 160, 80) };
+  color[] lairHudColor  = { color(210, 80, 80),  color(220, 160, 30) };
+
+  // Guard posts (2 per lair)
+  PVector[][] guardPosts;
+
+  // plant regrowth
+  int   plantCap       = 60;
+  int   regrowInterval = 120;
   int   regrowCounter  = 0;
-  boolean showGraph   = true;
+  boolean showGraph    = true;
 
-  // Birth counters (displayed in HUD)
-  int herbBirths = 0;
-  int carnBirths = 0;
+  // Birth / spawn counters for HUD
+  int herbBirths  = 0;
+  int carnBirths  = 0;
+  int herbEdgeSpawns = 0;
 
-  // Pending offspring queued during update to avoid
-  // ConcurrentModificationException mid-loop
+  // Pending offspring
   ArrayList<Creature> pendingHerbivores;
   ArrayList<Creature> pendingCarnivores;
 
-  // Population history for scrolling graph
+  // Population history
   int[] herbHistory;
   int[] carnHistory;
   int   historyHead = 0;
 
-  // Carnivore lair
-  PVector carnivoreLairCenter;
-  float carnivoreLairRadius = 20;
-  float carnivoreRestRadius = 12;
-  int maxCarnivoreLairResidents = 5;
-  PVector[] carnivoreGuardPosts;
+  // ── Manual spawn state ────────────────────────────────────────
+  // 0 = herbivore, 1 = carnivore
+  int spawnType = 0;
+  String[] spawnTypeNames = { "Herbivore", "Carnivore" };
 
+  // ── Constructor ───────────────────────────────────────────────
   World(int widthUnits, int heightUnits, int unitSize,
         int herbivoreCount, int carnivoreCount, int plantCount,
         int cameraWidthUnits, int cameraHeightUnits) {
@@ -88,14 +100,12 @@ class World {
     worldHeight = heightUnits;
     worldSize   = new PVector(worldWidth, worldHeight);
 
-    // build the terrain 
     terrain = new int[worldWidth][worldHeight];
     generateTerrain();
 
-    // Collections
-    herbivores       = new ArrayList<Creature>();
-    carnivores       = new ArrayList<Creature>();
-    plants           = new ArrayList<PVector>();
+    herbivores        = new ArrayList<Creature>();
+    carnivores        = new ArrayList<Creature>();
+    plants            = new ArrayList<PVector>();
     pendingHerbivores = new ArrayList<Creature>();
     pendingCarnivores = new ArrayList<Creature>();
 
@@ -105,75 +115,64 @@ class World {
     camera = new Camera(cameraWidthUnits, cameraHeightUnits,
                         gridSize, worldWidth, worldHeight);
 
-    carnivoreLairCenter = findNearestLandPosition(worldWidth * 0.68,
-                                                  worldHeight * 0.34);
-    updateCarnivoreGuardPosts();
+    // Place the two lairs on opposite sides of the map
+    lairCenters = new PVector[2];
+    lairCenters[0] = findNearestLandPosition(worldWidth * 0.25, worldHeight * 0.35);
+    lairCenters[1] = findNearestLandPosition(worldWidth * 0.72, worldHeight * 0.65);
 
-    // spawn creatures on walkable land
+    guardPosts = new PVector[2][];
+    updateGuardPosts(0);
+    updateGuardPosts(1);
+
+    // Spawn initial creatures, split evenly between lairs
     for (int i = 0; i < herbivoreCount; i++) {
-      herbivores.add(new Creature(randomLandPosition(), worldSize, false));
+      herbivores.add(new Creature(randomLandPosition(), worldSize, false, -1));
     }
-
     for (int i = 0; i < carnivoreCount; i++) {
-      carnivores.add(new Creature(randomLandPosition(), worldSize, true));
+      int lair = i % 2;
+      carnivores.add(new Creature(lairCenters[lair].copy(), worldSize, true, lair));
     }
-
-    // spawn plants on grass or brush only
     for (int i = 0; i < plantCount; i++) {
       plants.add(randomPlantPosition());
     }
   }
 
-  // Terrain generation
+  // ── Terrain generation ────────────────────────────────────────
   void generateTerrain() {
-    float scale = 0.035;          // bigger = smaller blobs
-    float offsetX = random(1000); // random seed so every run is unique
+    float scale   = 0.035;
+    float offsetX = random(1000);
     float offsetY = random(1000);
-
     for (int x = 0; x < worldWidth; x++) {
       for (int y = 0; y < worldHeight; y++) {
         float n = noise((x + offsetX) * scale, (y + offsetY) * scale);
-
-        if (n < 0.30) {
-          terrain[x][y] = WATER;
-        } else if (n < 0.55) {
-          terrain[x][y] = GRASSLAND;
-        } else if (n < 0.75) {
-          terrain[x][y] = BRUSH;
-        } else {
-          terrain[x][y] = ROCK;
-        }
+        if      (n < 0.30) terrain[x][y] = WATER;
+        else if (n < 0.55) terrain[x][y] = GRASSLAND;
+        else if (n < 0.75) terrain[x][y] = BRUSH;
+        else               terrain[x][y] = ROCK;
       }
     }
   }
 
-  // Terrain Rendering
   void drawTerrain() {
     noStroke();
-
-    int startX = camera.x;
-    int startY = camera.y;
+    int startX = camera.x,               startY = camera.y;
     int endX   = min(camera.x + camera.cols, worldWidth);
     int endY   = min(camera.y + camera.rows, worldHeight);
-
     for (int gx = startX; gx < endX; gx++) {
       for (int gy = startY; gy < endY; gy++) {
-        int screenX = (gx - camera.x) * camera.cellSize;
-        int screenY = (gy - camera.y) * camera.cellSize;
-
         switch (terrain[gx][gy]) {
           case GRASSLAND: fill(grassColor); break;
           case BRUSH:     fill(brushColor); break;
           case WATER:     fill(waterColor); break;
           case ROCK:      fill(rockColor);  break;
         }
-
-        rect(screenX, screenY, camera.cellSize, camera.cellSize);
+        rect((gx - camera.x)*camera.cellSize,
+             (gy - camera.y)*camera.cellSize,
+             camera.cellSize, camera.cellSize);
       }
     }
   }
 
-  // Terrain query helpers
   int getTerrainAt(float wx, float wy) {
     int gx = constrain(int(wx), 0, worldWidth  - 1);
     int gy = constrain(int(wy), 0, worldHeight - 1);
@@ -189,21 +188,22 @@ class World {
     if (!paused) {
       updateCreatures();
       updatePlantRegrowth();
+      maybeEdgeSpawnHerbivores();
       flushPending();
       pruneCorpses();
       recordHistory();
     }
 
-    drawTerrain();    // biome colred tiles
-    drawCarnivoreLair();
+    drawTerrain();
+    for (int i = 0; i < 2; i++) drawLair(i);
     camera.drawGrid();
     drawPlants();
     drawCreatures();
     drawHUD();
+    drawSpawnIndicator();
     if (showGraph) drawGraph();
   }
 
-  // Plant Regrowth
   void updatePlantRegrowth() {
     regrowCounter++;
     if (regrowCounter >= regrowInterval && plants.size() < plantCap) {
@@ -212,13 +212,11 @@ class World {
     }
   }
 
-  // ── Entity updates ────────────────────────────────────────────
   void updateCreatures() {
     for (Creature h : herbivores) h.update(this);
     for (Creature c : carnivores) c.update(this);
   }
 
-  // Add queued offspring now that iteration is complete
   void flushPending() {
     for (Creature c : pendingHerbivores) herbivores.add(c);
     for (Creature c : pendingCarnivores) carnivores.add(c);
@@ -226,7 +224,6 @@ class World {
     pendingCarnivores.clear();
   }
 
-  // Remove excess dead creatures to keep list sizes bounded
   void pruneCorpses() {
     pruneList(herbivores, MAX_CORPSES);
     pruneList(carnivores, MAX_CORPSES);
@@ -248,34 +245,67 @@ class World {
     historyHead = (historyHead + 1) % GRAPH_HISTORY;
   }
 
+  // ── Herbivore edge spawning ───────────────────────────────────
+  // Called every frame; spawns in batches every 120 frames when below threshold.
+  int edgeSpawnCooldown = 0;
+  void maybeEdgeSpawnHerbivores() {
+    int alive = countAlive(herbivores);
+    if (alive >= HERB_SPAWN_THRESHOLD) { edgeSpawnCooldown = 0; return; }
+    edgeSpawnCooldown++;
+    if (edgeSpawnCooldown < 120) return;  // throttle to once per 2 seconds
+    edgeSpawnCooldown = 0;
+
+    int deficit = HERB_SPAWN_THRESHOLD - alive;
+    // Spawn 1 creature per 5 below threshold (min 1, max 6)
+    int batch = constrain(deficit / 5, 1, 6);
+    for (int i = 0; i < batch; i++) {
+      if (countAlive(herbivores) >= MAX_HERBIVORES) break;
+      PVector pos = randomEdgePosition();
+      Creature h  = new Creature(pos, worldSize, false, -1);
+      pendingHerbivores.add(h);
+      herbEdgeSpawns++;
+    }
+  }
+
+  // Random walkable position along the four map edges
+  PVector randomEdgePosition() {
+    PVector pos;
+    int attempts = 0;
+    do {
+      int edge = int(random(4));
+      float x, y;
+      switch (edge) {
+        case 0: x = random(worldWidth);   y = 1;                break;
+        case 1: x = random(worldWidth);   y = worldHeight - 2;  break;
+        case 2: x = 1;                    y = random(worldHeight); break;
+        default:x = worldWidth - 2;       y = random(worldHeight); break;
+      }
+      pos = new PVector(x, y);
+      attempts++;
+    } while (!isWalkable(pos.x, pos.y) && attempts < 300);
+    return pos;
+  }
+
   // ── Reproduction ──────────────────────────────────────────────
-  // Called from Creature when two ready mates overlap.
-  // Both parents pay the energy cost; a child is queued.
   void spawnOffspring(Creature parentA, Creature parentB,
                       ArrayList<Creature> list) {
-    // Sanity – both parents must still be alive and willing
     if (!parentA.lifecycle.canReproduce() ||
         !parentB.lifecycle.canReproduce()) return;
 
-    // Population cap
     if (list == herbivores && countAlive(herbivores) >= MAX_HERBIVORES) return;
     if (list == carnivores && countAlive(carnivores) >= MAX_CARNIVORES) return;
 
-    // Deduct energy from parents
     parentA.lifecycle.changeEnergy(-parentA.lifecycle.reproductionCost);
     parentB.lifecycle.changeEnergy(-parentB.lifecycle.reproductionCost);
 
-    // Child spawns at midpoint between parents
-    PVector childPos = PVector.lerp(parentA.position, parentB.position, 0.5);
+    PVector childPos  = PVector.lerp(parentA.position, parentB.position, 0.5);
+    LifecycleSystem childLife = crossbreed(parentA.lifecycle, parentB.lifecycle);
 
-    // Build crossbred genome
-    LifecycleSystem childLife =
-      crossbreed(parentA.lifecycle, parentB.lifecycle);
-
+    // Child inherits parent A's lair allegiance (same species group)
+    int childLair = parentA.lairIndex;
     Creature child = new Creature(childPos, worldSize,
-                                  parentA.predator, childLife);
+                                  parentA.predator, childLair, childLife);
 
-    // Queue to avoid modifying lists during iteration
     if (list == herbivores) {
       pendingHerbivores.add(child);
       herbBirths++;
@@ -284,13 +314,147 @@ class World {
       carnBirths++;
     }
 
-    // Force parents back to WANDER so they don't immediately try
-    // to mate again (energy gate re-applies naturally)
     parentA.state = "WANDER";
     parentB.state = "WANDER";
   }
 
-  // ── Spatial queries ───────────────────────────────────────────
+  // ── Lair helpers ──────────────────────────────────────────────
+  int lairOf(PVector pos) {
+    // Returns which lair index this position is inside, or -1
+    for (int i = 0; i < 2; i++) {
+      if (PVector.dist(pos, lairCenters[i]) <= lairRadius) return i;
+    }
+    return -1;
+  }
+
+  boolean isInLair(PVector pos, int lairIdx) {
+    return PVector.dist(pos, lairCenters[lairIdx]) <= lairRadius;
+  }
+
+  boolean isInRestArea(PVector pos, int lairIdx) {
+    return PVector.dist(pos, lairCenters[lairIdx]) <= lairRestRadius;
+  }
+
+  // Distance between the two lair centers (used for enemy detection radius)
+  float lairSeparation() {
+    return PVector.dist(lairCenters[0], lairCenters[1]);
+  }
+
+  void updateGuardPosts(int idx) {
+    guardPosts[idx] = new PVector[2];
+    PVector c = lairCenters[idx];
+    guardPosts[idx][0] = new PVector(
+      constrain(c.x - lairRadius * 0.65, 1, worldWidth  - 1),
+      constrain(c.y,                     1, worldHeight - 1));
+    guardPosts[idx][1] = new PVector(
+      constrain(c.x + lairRadius * 0.65, 1, worldWidth  - 1),
+      constrain(c.y,                     1, worldHeight - 1));
+  }
+
+  // Guard-slot logic: first two alive carnivores of a given lair
+  boolean isCarnivoreGuard(Creature candidate) {
+    return candidate == getLairGuard(candidate.lairIndex, 0) ||
+           candidate == getLairGuard(candidate.lairIndex, 1);
+  }
+
+  Creature getLairGuard(int lairIdx, int slot) {
+    int found = 0;
+    for (Creature c : carnivores) {
+      if (!c.lifecycle.alive) continue;
+      if (c.lairIndex != lairIdx) continue;
+      if (found == slot) return c;
+      found++;
+    }
+    return null;
+  }
+
+  PVector getCarnivoreGuardPost(Creature guard) {
+    int li = guard.lairIndex;
+    if (guard == getLairGuard(li, 0)) return guardPosts[li][0].copy();
+    return guardPosts[li][1].copy();
+  }
+
+  int countLairResidents(int lairIdx) {
+    int n = 0;
+    for (Creature c : carnivores) {
+      if (!c.lifecycle.alive)         continue;
+      if (c.lairIndex != lairIdx)     continue;
+      if (isCarnivoreGuard(c))        continue;
+      if (!isInLair(c.position, lairIdx)) continue;
+      n++;
+    }
+    return n;
+  }
+
+  boolean isLairOverCapacity(int lairIdx) {
+    return countLairResidents(lairIdx) > maxLairResidents;
+  }
+
+  // Strongest non-guard resident inside a specific lair
+  Creature findStrongestLairResident(int lairIdx) {
+    Creature best = null;
+    for (Creature c : carnivores) {
+      if (!c.lifecycle.alive)             continue;
+      if (c.lairIndex != lairIdx)         continue;
+      if (isCarnivoreGuard(c))            continue;
+      if (!isInLair(c.position, lairIdx)) continue;
+      if (best == null || c.lifecycle.energy > best.lifecycle.energy) best = c;
+    }
+    return best;
+  }
+
+  boolean shouldLeaveOvercrowdedLair(Creature candidate) {
+    if (candidate == null || !candidate.lifecycle.alive) return false;
+    if (isCarnivoreGuard(candidate))                     return false;
+    int li = candidate.lairIndex;
+    if (!isInLair(candidate.position, li))               return false;
+
+    ArrayList<Creature> residents = new ArrayList<Creature>();
+    for (Creature c : carnivores) {
+      if (!c.lifecycle.alive)         continue;
+      if (c.lairIndex != li)          continue;
+      if (isCarnivoreGuard(c))        continue;
+      if (!isInLair(c.position, li))  continue;
+      residents.add(c);
+    }
+
+    while (residents.size() > maxLairResidents) {
+      Creature strongest = residents.get(0);
+      for (Creature c : residents)
+        if (c.lifecycle.energy > strongest.lifecycle.energy) strongest = c;
+      if (strongest == candidate) return true;
+      residents.remove(strongest);
+    }
+    return false;
+  }
+
+  // Nearest herbivore INSIDE a specific lair (for guards to chase)
+  Creature findNearestHerbivoreInLair(PVector from, float range, int lairIdx) {
+    Creature best = null;
+    float bestDist = range;
+    for (Creature h : herbivores) {
+      if (!h.lifecycle.alive)             continue;
+      if (!isInLair(h.position, lairIdx)) continue;
+      float d = PVector.dist(from, h.position);
+      if (d < bestDist) { bestDist = d; best = h; }
+    }
+    return best;
+  }
+
+  // Nearest ENEMY carnivore within range (different lair allegiance)
+  Creature findNearestEnemyCarnivore(PVector from, float range, int myLairIndex) {
+    Creature best = null;
+    float bestDist = range;
+    for (Creature c : carnivores) {
+      if (!c.lifecycle.alive)      continue;
+      if (c.lairIndex == myLairIndex) continue;  // same allegiance, skip
+      float d = PVector.dist(from, c.position);
+      if (d < bestDist) { bestDist = d; best = c; }
+    }
+    return best;
+  }
+
+  // ── Spatial queries (unchanged) ───────────────────────────────
   PVector findNearestPlant(PVector from, float range) {
     PVector best = null;
     float bestDist = range;
@@ -301,11 +465,11 @@ class World {
     return best;
   }
 
-  PVector findNearestPlantOutsideLair(PVector from, float range) {
+  PVector findNearestPlantOutsideLairs(PVector from, float range) {
     PVector best = null;
     float bestDist = range;
     for (PVector plant : plants) {
-      if (isInCarnivoreLair(plant)) continue;
+      if (lairOf(plant) >= 0) continue;  // skip plants inside any lair
       float d = PVector.dist(from, plant);
       if (d < bestDist) { bestDist = d; best = plant; }
     }
@@ -324,140 +488,26 @@ class World {
     return best;
   }
 
-  // Finds all alive carnivores within range, excluding self.
-  ArrayList<Creature> findNearbyCarnivores(PVector pos, float range, Creature self) {
+  ArrayList<Creature> findNearbyCarnivores(PVector pos, float range,
+                                            Creature self) {
     ArrayList<Creature> nearby = new ArrayList<Creature>();
-
     for (Creature c : carnivores) {
-      if (c == self) continue;
-      if (!c.lifecycle.alive) continue;
-
-      if (PVector.dist(pos, c.position) <= range) {
-        nearby.add(c);
-      }
+      if (c == self || !c.lifecycle.alive) continue;
+      if (PVector.dist(pos, c.position) <= range) nearby.add(c);
     }
-
     return nearby;
   }
 
-  boolean isInCarnivoreLair(PVector pos) {
-    return PVector.dist(pos, carnivoreLairCenter) <= carnivoreLairRadius;
-  }
-
-  boolean isInCarnivoreRestArea(PVector pos) {
-    return PVector.dist(pos, carnivoreLairCenter) <= carnivoreRestRadius;
-  }
-
-  Creature getCarnivoreGuard(int slot) {
-    int found = 0;
-    for (Creature c : carnivores) {
-      if (!c.lifecycle.alive) continue;
-      if (found == slot) return c;
-      found++;
-    }
-    return null;
-  }
-
-  boolean isCarnivoreGuard(Creature candidate) {
-    return candidate == getCarnivoreGuard(0) ||
-           candidate == getCarnivoreGuard(1);
-  }
-
-  PVector getCarnivoreGuardPost(Creature guard) {
-    if (guard == getCarnivoreGuard(0)) return carnivoreGuardPosts[0].copy();
-    return carnivoreGuardPosts[1].copy();
-  }
-
-  Creature findNearestHerbivoreInLair(PVector from, float range) {
-    Creature best = null;
-    float bestDist = range;
-
-    for (Creature h : herbivores) {
-      if (!h.lifecycle.alive) continue;
-      if (!isInCarnivoreLair(h.position)) continue;
-
-      float d = PVector.dist(from, h.position);
-      if (d < bestDist) {
-        bestDist = d;
-        best = h;
-      }
-    }
-
-    return best;
-  }
-
-  int countCarnivoreLairResidents() {
-    int count = 0;
-    for (Creature c : carnivores) {
-      if (!c.lifecycle.alive) continue;
-      if (isCarnivoreGuard(c)) continue;
-      if (!isInCarnivoreLair(c.position)) continue;
-      count++;
-    }
-    return count;
-  }
-
-  boolean isCarnivoreLairOverCapacity() {
-    return countCarnivoreLairResidents() > maxCarnivoreLairResidents;
-  }
-
-  Creature findStrongestCarnivoreInLair() {
-    Creature strongest = null;
-
-    for (Creature c : carnivores) {
-      if (!c.lifecycle.alive) continue;
-      if (isCarnivoreGuard(c)) continue;
-      if (!isInCarnivoreLair(c.position)) continue;
-
-      if (strongest == null || c.lifecycle.energy > strongest.lifecycle.energy) {
-        strongest = c;
-      }
-    }
-
-    return strongest;
-  }
-
-  boolean shouldLeaveOvercrowdedLair(Creature candidate) {
-    if (candidate == null) return false;
-    if (!candidate.lifecycle.alive) return false;
-    if (isCarnivoreGuard(candidate)) return false;
-    if (!isInCarnivoreLair(candidate.position)) return false;
-
-    ArrayList<Creature> residents = new ArrayList<Creature>();
-    for (Creature c : carnivores) {
-      if (!c.lifecycle.alive) continue;
-      if (isCarnivoreGuard(c)) continue;
-      if (!isInCarnivoreLair(c.position)) continue;
-      residents.add(c);
-    }
-
-    while (residents.size() > maxCarnivoreLairResidents) {
-      Creature strongest = residents.get(0);
-      for (Creature c : residents) {
-        if (c.lifecycle.energy > strongest.lifecycle.energy) {
-          strongest = c;
-        }
-      }
-
-      if (strongest == candidate) {
-        return true;
-      }
-      residents.remove(strongest);
-    }
-
-    return false;
-  }
-
-  // Finds the nearest alive, reproduction-ready creature in list
-  // that is not the caller itself.
   Creature findNearestReadyMate(PVector from, ArrayList<Creature> list,
                                  Creature self, float range) {
     Creature best = null;
     float bestDist = range;
     for (Creature c : list) {
-      if (c == self) continue;
-      if (!c.lifecycle.alive) continue;
+      if (c == self)              continue;
+      if (!c.lifecycle.alive)     continue;
       if (!c.lifecycle.canReproduce()) continue;
+      // Carnivores must share lair allegiance to mate
+      if (self.predator && c.lairIndex != self.lairIndex) continue;
       float d = PVector.dist(from, c.position);
       if (d < bestDist) { bestDist = d; best = c; }
     }
@@ -465,11 +515,39 @@ class World {
   }
 
   void consumePlant(PVector plant) {
-    if (plant == null) {
-      return;
-    }
-
+    if (plant == null) return;
     plant.set(randomPlantPosition());
+  }
+
+  // ── Roam radius for a given carnivore ─────────────────────────
+  // At high energy → small radius (stay near lair).
+  // At low energy  → large radius (hunt far afield).
+  float roamRadiusFor(Creature c) {
+    float t = c.lifecycle.energy / c.lifecycle.maxEnergy;  // 1 = full, 0 = starving
+    // Linearly interpolate: full energy → MIN radius, zero energy → MAX radius
+    return lerp(ROAM_RADIUS_MAX, ROAM_RADIUS_MIN, t);
+  }
+
+  // Is a position within the carnivore's allowed roam circle?
+  boolean isInRoamRadius(PVector pos, int lairIdx, float radius) {
+    return PVector.dist(pos, lairCenters[lairIdx]) <= radius;
+  }
+
+  // A random wander target within roam radius that is walkable
+  PVector randomRoamTarget(int lairIdx, float radius) {
+    PVector center = lairCenters[lairIdx];
+    PVector target;
+    int attempts = 0;
+    do {
+      float angle = random(TWO_PI);
+      float dist  = random(radius * 0.4, radius);
+      target = new PVector(center.x + cos(angle) * dist,
+                           center.y + sin(angle) * dist);
+      target.x = constrain(target.x, 1, worldWidth  - 1);
+      target.y = constrain(target.y, 1, worldHeight - 1);
+      attempts++;
+    } while (!isWalkable(target.x, target.y) && attempts < 200);
+    return target;
   }
 
   // ── Drawing ───────────────────────────────────────────────────
@@ -483,31 +561,34 @@ class World {
     }
   }
 
-  void drawCarnivoreLair() {
-    if (!camera.isVisible(carnivoreLairCenter)) return;
+  void drawLair(int idx) {
+    PVector c = lairCenters[idx];
+    if (!camera.isVisible(c)) return;
+    PVector sc   = camera.worldToScreen(c);
+    float ld = lairRadius     * 2 * camera.cellSize;
+    float rd = lairRestRadius * 2 * camera.cellSize;
 
-    PVector screenCenter = camera.worldToScreen(carnivoreLairCenter);
-    float lairDiameter = carnivoreLairRadius * 2 * camera.cellSize;
-    float restDiameter = carnivoreRestRadius * 2 * camera.cellSize;
-
+    color baseCol = lairHudColor[idx];
     noStroke();
-    fill(140, 55, 55, 80);
-    ellipse(screenCenter.x, screenCenter.y, lairDiameter, lairDiameter);
-    fill(180, 85, 85, 110);
-    ellipse(screenCenter.x, screenCenter.y, restDiameter, restDiameter);
+    fill(red(baseCol), green(baseCol), blue(baseCol), 60);
+    ellipse(sc.x, sc.y, ld, ld);
+    fill(red(baseCol), green(baseCol), blue(baseCol), 90);
+    ellipse(sc.x, sc.y, rd, rd);
 
-    stroke(120, 35, 35, 190);
+    stroke(red(baseCol), green(baseCol), blue(baseCol), 180);
     noFill();
-    ellipse(screenCenter.x, screenCenter.y, lairDiameter, lairDiameter);
+    ellipse(sc.x, sc.y, ld, ld);
+    noStroke();
 
     fill(255, 230, 220);
     textSize(12);
-    text("Carnivore Lair", screenCenter.x - 36, screenCenter.y - lairDiameter * 0.55);
+    String label = (idx == 0) ? "Lair 1" : "Lair 2";
+    text(label, sc.x - 22, sc.y - ld * 0.5 - 4);
   }
 
   void drawCreatures() {
-    for (Creature h : herbivores) h.draw(camera, showRanges);
-    for (Creature c : carnivores) c.draw(camera, showRanges);
+    for (Creature h : herbivores) h.draw(camera, showRanges, this);
+    for (Creature c : carnivores) c.draw(camera, showRanges, this);
   }
 
   // ── HUD ───────────────────────────────────────────────────────
@@ -517,31 +598,149 @@ class World {
 
     fill(0, 170);
     noStroke();
-    rect(10, 10, 350, 220, 6);
+    rect(10, 10, 370, 240, 6);
 
     fill(255);
     textSize(18);
-    text("Processing EcoSim", 20, 32);
-    textSize(15);
+    text("EcoSim", 20, 32);
+    textSize(12);
     fill(200);
-    text("Arrow keys: camera  |  R: ranges  |  P: pause  |  G: graph", 20, 50);
+    text("Arrows: camera  R: ranges  P: pause  G: graph  A/D: spawn type  Space: spawn", 20, 48);
 
     fill(255);
+    textSize(13);
     text("Herbivores alive : " + aH +
-         "  (births: " + herbBirths + ")", 20, 72);
+         "  (births: " + herbBirths +
+         "  edge: " + herbEdgeSpawns + ")", 20, 68);
     text("Carnivores alive : " + aC +
-         "  (births: " + carnBirths + ")", 20, 88);
-    text("Plants           : " + plants.size(), 20, 104);
-    text("Carnivore lair   : 5 residents max, 2 guards defend and cull extras", 20, 120);
+         "  (births: " + carnBirths + ")", 20, 84);
+    text("Plants           : " + plants.size(), 20, 100);
 
-    // Average stats for each species
-    text("Herbivore avg stats: ", 20, 138);
-    text(avgStatsLabel(herbivores), 20, 154);
-    text("Carnivore avg stats: ", 20, 170);
-    text(avgStatsLabel(carnivores), 20, 186);
+    // Per-lair counts
+    int c0 = countAliveLair(0), c1 = countAliveLair(1);
+    fill(lairHudColor[0]); text("Lair 1: " + c0, 20, 118);
+    fill(lairHudColor[1]); text("Lair 2: " + c1, 20, 134);
 
-    text("Camera: (" + camera.x + ", " + camera.y + ")", 20, 202);
-    text("Repro threshold: 75 energy  |  Cost: 25 / parent", 20, 218);
+    fill(255);
+    text("Herbivore avg: " + avgStatsLabel(herbivores), 20, 152);
+    text("Carnivore avg: " + avgStatsLabel(carnivores), 20, 168);
+    text("Camera: (" + camera.x + ", " + camera.y + ")", 20, 184);
+    text("Repro threshold: 75  |  Cost: 25 / parent", 20, 200);
+    text("Herb edge-spawn threshold: " + HERB_SPAWN_THRESHOLD, 20, 216);
+    text("Hibernate: return >" + int(HIBERNATE_RETURN_THRESHOLD*100) +
+         "% energy, exit <" + int(HIBERNATE_EXIT_THRESHOLD*100) + "%", 20, 232);
+  }
+
+  // ── Spawn type indicator (bottom-left) ────────────────────────
+  void drawSpawnIndicator() {
+    int bx = 10, by = height - 144;
+    fill(0, 160);
+    noStroke();
+    rect(bx, by, 160, 34, 5);
+    fill(255);
+    textSize(11);
+    text("Spawn [A/D + Space]:", bx + 6, by + 14);
+    color c;
+    switch (spawnType) {
+      case 0:  c = color( 80, 140, 255); break;
+      case 1:  c = color(230,  80,  80); break;
+      default: c = color( 170, 170, 170); break;
+    }
+    fill(c);
+    textSize(13);
+    text("▶ " + spawnTypeNames[spawnType], bx + 6, by + 29);
+  }
+
+  // ── Population graph ──────────────────────────────────────────
+  void drawGraph() {
+    int gx = width - GRAPH_HISTORY - 15;
+    int gy = height - 80;
+    int gh = 60;
+
+    fill(0, 160);
+    noStroke();
+    rect(gx - 5, gy - gh - 15, GRAPH_HISTORY + 10, gh + 30, 4);
+    fill(180);
+    textSize(10);
+    text("Population (last " + GRAPH_HISTORY + " frames)", gx, gy - gh - 2);
+
+    int peak = 10;
+    for (int i = 0; i < GRAPH_HISTORY; i++)
+      peak = max(peak, herbHistory[i], carnHistory[i]);
+
+    for (int i = 1; i < GRAPH_HISTORY; i++) {
+      int prev = (historyHead + i - 1) % GRAPH_HISTORY;
+      int curr = (historyHead + i)     % GRAPH_HISTORY;
+      float x0 = gx + i - 1, x1 = gx + i;
+      stroke(80, 140, 255, 200);
+      line(x0, gy - gh * herbHistory[prev] / (float)peak,
+           x1, gy - gh * herbHistory[curr] / (float)peak);
+      stroke(220, 80, 80, 200);
+      line(x0, gy - gh * carnHistory[prev] / (float)peak,
+           x1, gy - gh * carnHistory[curr] / (float)peak);
+    }
+    noStroke();
+    fill( 80, 140, 255); rect(gx,      gy + 5, 10, 8);
+    fill(200); text("Herb", gx + 14,   gy + 13);
+    fill(220,  80,  80); rect(gx + 50, gy + 5, 10, 8);
+    fill(200); text("Carn", gx + 64,   gy + 13);
+  }
+
+  // ── Controls ──────────────────────────────────────────────────
+  void handleKeyPressed(char pressedKey, int pressedKeyCode) {
+    handleKey(pressedKey, pressedKeyCode);
+  }
+
+  void handleKey(char pressedKey, int pressedKeyCode) {
+    if (pressedKeyCode == LEFT)  camera.move(-4,  0);
+    if (pressedKeyCode == RIGHT) camera.move( 4,  0);
+    if (pressedKeyCode == UP)    camera.move( 0, -4);
+    if (pressedKeyCode == DOWN)  camera.move( 0,  4);
+    if (pressedKey == 'r' || pressedKey == 'R') showRanges = !showRanges;
+    if (pressedKey == 'p' || pressedKey == 'P') paused     = !paused;
+    if (pressedKey == 'g' || pressedKey == 'G') showGraph  = !showGraph;
+
+    // Cycle spawn type
+    if (pressedKey == 'a' || pressedKey == 'A' || pressedKey == 'd' || pressedKey == 'D')
+      spawnType = (spawnType + 1) % 2;
+
+    // Spawn at mouse world position
+    if (pressedKey == ' ') {
+      // Convert mouse screen coords → world coords
+      float wx = camera.x + mouseX / (float)camera.cellSize;
+      float wy = camera.y + mouseY / (float)camera.cellSize;
+      if (isWalkable(wx, wy)) {
+        PVector pos = new PVector(wx, wy);
+        switch (spawnType) {
+          case 0:
+            if (countAlive(herbivores) < MAX_HERBIVORES)
+              herbivores.add(new Creature(pos, worldSize, false, -1));
+            break;
+          case 1:
+            if (countAlive(carnivores) < MAX_CARNIVORES) {
+              // Assign to whichever lair is closer
+              int li = (PVector.dist(pos, lairCenters[0]) <
+                        PVector.dist(pos, lairCenters[1])) ? 0 : 1;
+              carnivores.add(new Creature(pos, worldSize, true, li));
+            }
+            break;
+        }
+      }
+    }
+  }
+
+  // ── Utility ───────────────────────────────────────────────────
+  int countAlive(ArrayList<Creature> creatures) {
+    int n = 0;
+    for (Creature c : creatures) if (c.lifecycle.alive) n++;
+    return n;
+  }
+
+  int countAliveLair(int lairIdx) {
+    int n = 0;
+    for (Creature c : carnivores)
+      if (c.lifecycle.alive && c.lairIndex == lairIdx) n++;
+    return n;
   }
 
   String avgStatsLabel(ArrayList<Creature> list) {
@@ -554,83 +753,10 @@ class World {
       sumDet += c.lifecycle.detectionRange;
       n++;
     }
-    if (n == 0) return "  (none alive)";
-    return String.format("  speed:%.3f  metabolism:%.3f  detection range:%.1f",
-      sumSpd/n, sumMet/n, sumDet/n);
+    if (n == 0) return "(none alive)";
+    return String.format("spd:%.3f  met:%.3f  det:%.1f", sumSpd/n, sumMet/n, sumDet/n);
   }
 
-  // ── Population graph (scrolling) ──────────────────────────────
-  void drawGraph() {
-    int gx = width - GRAPH_HISTORY - 15;
-    int gy = height - 80;
-    int gh = 60;
-
-    fill(0, 160);
-    noStroke();
-    rect(gx - 5, gy - gh - 15, GRAPH_HISTORY + 10, gh + 30, 4);
-
-    fill(180);
-    textSize(10);
-    text("Population (last " + GRAPH_HISTORY + " frames)", gx, gy - gh - 2);
-
-    // Find max for scaling
-    int peak = 10;
-    for (int i = 0; i < GRAPH_HISTORY; i++) {
-      peak = max(peak, herbHistory[i], carnHistory[i]);
-    }
-
-    // Draw lines
-    for (int i = 1; i < GRAPH_HISTORY; i++) {
-      int prev = (historyHead + i - 1) % GRAPH_HISTORY;
-      int curr = (historyHead + i)     % GRAPH_HISTORY;
-
-      float x0 = gx + i - 1;
-      float x1 = gx + i;
-
-      // Herbivore – blue
-      stroke(80, 140, 255, 200);
-      line(x0, gy - gh * herbHistory[prev] / (float)peak,
-           x1, gy - gh * herbHistory[curr] / (float)peak);
-
-      // Carnivore – red
-      stroke(220, 80, 80, 200);
-      line(x0, gy - gh * carnHistory[prev] / (float)peak,
-           x1, gy - gh * carnHistory[curr] / (float)peak);
-    }
-
-    noStroke();
-    fill(80, 140, 255); rect(gx, gy + 5, 10, 8);
-    fill(200); text("Herb", gx + 14, gy + 13);
-    fill(220, 80, 80); rect(gx + 50, gy + 5, 10, 8);
-    fill(200); text("Carn", gx + 64, gy + 13);
-  }
-
-  // ── Controls ──────────────────────────────────────────────────
-  void handleKeyPressed(char pressedKey, int pressedKeyCode) {
-    handleKey(pressedKey, pressedKeyCode);
-  }
-  void handleKey(char pressedKey, int pressedKeyCode) {
-    if (pressedKeyCode == LEFT)  camera.move(-4,  0);
-    if (pressedKeyCode == RIGHT) camera.move( 4,  0);
-    if (pressedKeyCode == UP)    camera.move( 0, -4);
-    if (pressedKeyCode == DOWN)  camera.move( 0,  4);
-    if (pressedKey == 'r' || pressedKey == 'R') showRanges = !showRanges;
-    if (pressedKey == 'p' || pressedKey == 'P') paused     = !paused;
-    if (pressedKey == 'g' || pressedKey == 'G') showGraph  = !showGraph;
-  }
-
-  // ── Utility ───────────────────────────────────────────────────
-  int countAlive(ArrayList<Creature> creatures) {
-    int n = 0;
-    for (Creature c : creatures) if (c.lifecycle.alive) n++;
-    return n;
-  }
-
-  PVector randomWorldPosition() {
-    return new PVector(random(worldWidth), random(worldHeight));
-  }
-
-  // random position on any non-water tile
   PVector randomLandPosition() {
     PVector pos;
     int attempts = 0;
@@ -641,77 +767,50 @@ class World {
     return pos;
   }
 
-  // random position on grassland or brush, not adjacent to water (Map = Rikesh)
   PVector randomPlantPosition() {
     PVector pos;
     int attempts = 0;
     do {
       pos = new PVector(random(50, worldWidth-50), random(50, worldHeight-50));
       attempts++;
-    } while ((!isGoodPlantTile(pos.x, pos.y) || isInCarnivoreLair(pos)) &&
+    } while ((!isGoodPlantTile(pos.x, pos.y) || lairOf(pos) >= 0) &&
              attempts < 500);
     return pos;
   }
 
-  // Rejects plant spots that have water within 2 tiles (Map = Rikesh)
   boolean isGoodPlantTile(float wx, float wy) {
     int t = getTerrainAt(wx, wy);
     if (t != GRASSLAND && t != BRUSH) return false;
-
-    int gx = int(wx);
-    int gy = int(wy);
-    for (int dx = -2; dx <= 2; dx++) {
+    int gx = int(wx), gy = int(wy);
+    for (int dx = -2; dx <= 2; dx++)
       for (int dy = -2; dy <= 2; dy++) {
-        int nx = gx + dx;
-        int ny = gy + dy;
-        if (nx >= 0 && nx < worldWidth && ny >= 0 && ny < worldHeight) {
+        int nx = gx+dx, ny = gy+dy;
+        if (nx >= 0 && nx < worldWidth && ny >= 0 && ny < worldHeight)
           if (terrain[nx][ny] == WATER) return false;
-        }
       }
-    }
     return true;
   }
 
-  PVector getCarnivoreLairExitPoint(PVector from) {
-    PVector direction = PVector.sub(from, carnivoreLairCenter);
-    if (direction.magSq() < 0.001) {
-      direction = PVector.random2D();
-    }
-
-    direction.normalize();
-    PVector target = PVector.add(carnivoreLairCenter,
-      PVector.mult(direction, carnivoreLairRadius + 8));
+  // Exit point from a specific lair
+  PVector getLairExitPoint(PVector from, int lairIdx) {
+    PVector lc  = lairCenters[lairIdx];
+    PVector dir = PVector.sub(from, lc);
+    if (dir.magSq() < 0.001) dir = PVector.random2D();
+    dir.normalize();
+    PVector target = PVector.add(lc, PVector.mult(dir, lairRadius + 8));
     return findNearestLandPosition(target.x, target.y);
   }
 
   PVector findNearestLandPosition(float preferredX, float preferredY) {
-    int baseX = constrain(round(preferredX), 0, worldWidth - 1);
+    int baseX = constrain(round(preferredX), 0, worldWidth  - 1);
     int baseY = constrain(round(preferredY), 0, worldHeight - 1);
-
-    for (int radius = 0; radius < max(worldWidth, worldHeight); radius++) {
-      for (int dx = -radius; dx <= radius; dx++) {
+    for (int radius = 0; radius < max(worldWidth, worldHeight); radius++)
+      for (int dx = -radius; dx <= radius; dx++)
         for (int dy = -radius; dy <= radius; dy++) {
-          int x = constrain(baseX + dx, 0, worldWidth - 1);
-          int y = constrain(baseY + dy, 0, worldHeight - 1);
-          if (isWalkable(x, y)) {
-            return new PVector(x, y);
-          }
+          int x = constrain(baseX+dx, 0, worldWidth -1);
+          int y = constrain(baseY+dy, 0, worldHeight-1);
+          if (isWalkable(x, y)) return new PVector(x, y);
         }
-      }
-    }
-
     return randomLandPosition();
-  }
-
-  void updateCarnivoreGuardPosts() {
-    carnivoreGuardPosts = new PVector[2];
-    carnivoreGuardPosts[0] = new PVector(
-      constrain(carnivoreLairCenter.x - carnivoreLairRadius * 0.65, 1, worldWidth - 1),
-      constrain(carnivoreLairCenter.y, 1, worldHeight - 1)
-    );
-    carnivoreGuardPosts[1] = new PVector(
-      constrain(carnivoreLairCenter.x + carnivoreLairRadius * 0.65, 1, worldWidth - 1),
-      constrain(carnivoreLairCenter.y, 1, worldHeight - 1)
-    );
   }
 }

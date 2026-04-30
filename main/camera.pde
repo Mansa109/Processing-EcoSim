@@ -1,7 +1,6 @@
 // ============================================================
 //  EcoSim – camera.pde
 //  Viewport movement, visibility checks, world→screen coords.
-//  (Unchanged from original.)
 // ============================================================
 
 class Camera {
