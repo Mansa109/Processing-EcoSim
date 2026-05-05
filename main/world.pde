@@ -11,7 +11,7 @@ final int MAX_CORPSES    = 30;
 final int GRAPH_HISTORY  = 300;
 
 // Herbivore edge-spawn threshold
-final int HERB_SPAWN_THRESHOLD = 30;  // below this, edges start spawning
+final int HERB_SPAWN_THRESHOLD = 60;  // below this, edges start spawning
 
 // Terrain type constants (must stay accessible to all .pde files)
 final int GRASSLAND = 0;
@@ -62,8 +62,6 @@ class World {
   color[] lairColorHigh = { color(230, 80, 80),  color(230, 160, 80) };
   color[] lairHudColor  = { color(210, 80, 80),  color(220, 160, 30) };
 
-  // Guard posts (2 per lair)
-  PVector[][] guardPosts;
 
   // plant regrowth
   int   plantCap       = 60;
@@ -119,10 +117,6 @@ class World {
     lairCenters = new PVector[2];
     lairCenters[0] = findNearestLandPosition(worldWidth * 0.25, worldHeight * 0.35);
     lairCenters[1] = findNearestLandPosition(worldWidth * 0.72, worldHeight * 0.65);
-
-    guardPosts = new PVector[2][];
-    updateGuardPosts(0);
-    updateGuardPosts(1);
 
     // Spawn initial creatures, split evenly between lairs
     for (int i = 0; i < herbivoreCount; i++) {
@@ -340,46 +334,11 @@ class World {
     return PVector.dist(lairCenters[0], lairCenters[1]);
   }
 
-  void updateGuardPosts(int idx) {
-    guardPosts[idx] = new PVector[2];
-    PVector c = lairCenters[idx];
-    guardPosts[idx][0] = new PVector(
-      constrain(c.x - lairRadius * 0.65, 1, worldWidth  - 1),
-      constrain(c.y,                     1, worldHeight - 1));
-    guardPosts[idx][1] = new PVector(
-      constrain(c.x + lairRadius * 0.65, 1, worldWidth  - 1),
-      constrain(c.y,                     1, worldHeight - 1));
-  }
-
-  // Guard-slot logic: first two alive carnivores of a given lair
-  boolean isCarnivoreGuard(Creature candidate) {
-    return candidate == getLairGuard(candidate.lairIndex, 0) ||
-           candidate == getLairGuard(candidate.lairIndex, 1);
-  }
-
-  Creature getLairGuard(int lairIdx, int slot) {
-    int found = 0;
-    for (Creature c : carnivores) {
-      if (!c.lifecycle.alive) continue;
-      if (c.lairIndex != lairIdx) continue;
-      if (found == slot) return c;
-      found++;
-    }
-    return null;
-  }
-
-  PVector getCarnivoreGuardPost(Creature guard) {
-    int li = guard.lairIndex;
-    if (guard == getLairGuard(li, 0)) return guardPosts[li][0].copy();
-    return guardPosts[li][1].copy();
-  }
-
   int countLairResidents(int lairIdx) {
     int n = 0;
     for (Creature c : carnivores) {
       if (!c.lifecycle.alive)         continue;
       if (c.lairIndex != lairIdx)     continue;
-      if (isCarnivoreGuard(c))        continue;
       if (!isInLair(c.position, lairIdx)) continue;
       n++;
     }
@@ -390,13 +349,12 @@ class World {
     return countLairResidents(lairIdx) > maxLairResidents;
   }
 
-  // Strongest non-guard resident inside a specific lair
+  // Strongest resident inside a specific lair
   Creature findStrongestLairResident(int lairIdx) {
     Creature best = null;
     for (Creature c : carnivores) {
       if (!c.lifecycle.alive)             continue;
       if (c.lairIndex != lairIdx)         continue;
-      if (isCarnivoreGuard(c))            continue;
       if (!isInLair(c.position, lairIdx)) continue;
       if (best == null || c.lifecycle.energy > best.lifecycle.energy) best = c;
     }
@@ -405,7 +363,6 @@ class World {
 
   boolean shouldLeaveOvercrowdedLair(Creature candidate) {
     if (candidate == null || !candidate.lifecycle.alive) return false;
-    if (isCarnivoreGuard(candidate))                     return false;
     int li = candidate.lairIndex;
     if (!isInLair(candidate.position, li))               return false;
 
@@ -413,7 +370,6 @@ class World {
     for (Creature c : carnivores) {
       if (!c.lifecycle.alive)         continue;
       if (c.lairIndex != li)          continue;
-      if (isCarnivoreGuard(c))        continue;
       if (!isInLair(c.position, li))  continue;
       residents.add(c);
     }
@@ -598,7 +554,7 @@ class World {
 
     fill(0, 170);
     noStroke();
-    rect(10, 10, 370, 240, 6);
+    rect(10, 10, 420, 240, 6);
 
     fill(255);
     textSize(18);

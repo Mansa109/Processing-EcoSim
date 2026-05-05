@@ -58,7 +58,7 @@ When a herbivore population drops below **30 alive**, new herbivores begin spawn
 
 Carnivores are territory-holding predators. Each one belongs to one of two lairs and will never mate with a creature from the other lair. Their priority order is:
 
-1. **Guard duty** (guards only) — hold a fixed post; hunt enemies and herbivore intruders on sight
+1. **Guard duty** hunt enemies and herbivore intruders on sight
 2. **Hunt enemy carnivores** — if a rival-lair predator enters the territory zone
 3. **Defend lair** — kill herbivores that have wandered inside
 4. **Return to lair** — if energy is above 85%, head home to hibernate
@@ -81,8 +81,7 @@ Two carnivore lairs spawn each run on opposite sides of the map — far enough a
 Each lair has:
 - A **rest zone** (inner circle) — where hibernating creatures recover
 - A **territory zone** (outer circle) — any enemy carnivore inside this radius is attacked on sight
-- **Two permanent guards** — pinned to flanking posts, full energy at all times, first responders to intrusions
-- A **resident cap of 5** non-guard carnivores; the strongest occupants are evicted first when overcrowded
+- A **resident cap of 5** the strongest occupants are evicted first when overcrowded
 
 Creatures remember their allegiance across generations — offspring inherit the lair index of their parent.
 
@@ -149,7 +148,6 @@ The **spawn indicator** (bottom-left) shows the currently selected manual spawn 
 | Blue triangle | Herbivore |
 | Red triangle | Lair 1 carnivore |
 | Orange triangle | Lair 2 carnivore |
-| White triangle | Guard (any lair) |
 | Dark faded triangle | Dead creature (corpse) |
 | `♥` above creature | Currently in REPRODUCE state |
 | `Z` above creature | Currently HIBERNATING |
@@ -171,7 +169,6 @@ The **spawn indicator** (bottom-left) shows the currently selected manual spawn 
 | `ROAM` | Carnivore | Patrolling territory at current roam radius |
 | `RETURN` | Carnivore | Heading back to lair (high energy) |
 | `HIBERNATE` | Carnivore | Resting in lair (slow metabolism) |
-| `GUARD` | Carnivore | Holding a fixed sentinel post |
 | `DEFEND` | Carnivore | Chasing herbivore intruder inside lair |
 | `HUNT_ENEMY` | Carnivore | Chasing a rival-lair predator |
 | `LEAVE_LAIR` | Carnivore | Exiting lair (evicted or energy threshold met) |

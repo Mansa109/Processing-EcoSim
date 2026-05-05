@@ -105,27 +105,16 @@ class Creature {
       position.y = constrain(position.y, 1, boundaries.y - 1);
     }
 
-    // Guards are pinned to their posts
-    if (predator && world.isCarnivoreGuard(this)) {
-      position.set(world.getCarnivoreGuardPost(this));
-      velocity.set(0, 0);
-      acceleration.set(0, 0);
-    }
-
     // Track time entered lair
-    if (predator && !world.isCarnivoreGuard(this) &&
-        world.isInLair(position, lairIndex)) {
+    if (predator && world.isInLair(position, lairIndex)) {
       if (enteredLairAtFrame < 0 ||
           !world.isInLair(PVector.sub(position, velocity), lairIndex)) {
         enteredLairAtFrame = frameCount;
       }
     }
 
-    // Metabolism (guards burn nothing)
-    if (predator && world.isCarnivoreGuard(this)) {
-      lifecycle.energy = lifecycle.maxEnergy;
-      lifecycle.hunger = 0;
-    } else if (state.equals("HIBERNATE")) {
+    // Metabolism
+    if (predator && state.equals("HIBERNATE")) {
       // Hibernate: burn at 30 % of normal rate
       lifecycle.changeEnergy(-lifecycle.metabolism * 0.30);
       lifecycle.hunger = 1 - (lifecycle.energy / lifecycle.maxEnergy);
@@ -147,55 +136,6 @@ class Creature {
     boolean highEnergy   = lifecycle.energy >= lifecycle.maxEnergy * HIBERNATE_RETURN_THRESHOLD;
     boolean lowEnergy    = lifecycle.energy <  lifecycle.maxEnergy * HIBERNATE_EXIT_THRESHOLD;
     float   roamR        = world.roamRadiusFor(this);
-
-    // ── Guards ──
-    if (world.isCarnivoreGuard(this)) {
-      lifecycle.energy = lifecycle.maxEnergy;
-      state = "GUARD";
-      PVector post = world.getCarnivoreGuardPost(this);
-      seek(post);
-      if (isCloseTo(post, 1.4)) velocity.mult(0.45);
-
-      // Guards hunt enemy carnivores that stray near the lair
-      Creature enemy = world.findNearestEnemyCarnivore(
-        position, world.lairRadius * 1.5, lairIndex);
-      if (enemy != null) {
-        state = "HUNT_ENEMY";
-        seek(enemy.position);
-        if (isCloseTo(enemy.position, 1.2)) {
-          enemy.lifecycle.die();
-          enemy.state = "DEAD";
-          lifecycle.changeEnergy(enemy.energyValue);
-        }
-        return;
-      }
-
-      // Guards also cull herbivore intruders
-      Creature intruder = world.findNearestHerbivoreInLair(
-        position, lifecycle.detectionRange * 1.35, lairIndex);
-      if (intruder != null) {
-        state = "DEFEND";
-        seek(intruder.position);
-        if (isCloseTo(intruder.position, 1.2)) {
-          intruder.lifecycle.die();
-          intruder.state = "DEAD";
-          lifecycle.changeEnergy(energyValue);
-        }
-        return;
-      }
-
-      // Evict overcrowded residents
-      Creature strongest = world.findStrongestLairResident(lairIndex);
-      if (world.isLairOverCapacity(lairIndex) && strongest != null &&
-          world.shouldLeaveOvercrowdedLair(strongest) &&
-          strongest.lifecycle.energy >= strongest.lifecycle.maxEnergy * 0.60 &&
-          frameCount - strongest.enteredLairAtFrame >= LAIR_MIN_STAY_FRAMES) {
-        strongest.beginLairExit(world);
-      }
-      return;
-    }
-
-    // ── Non-guard carnivore ──
 
     // Hunt enemy carnivores near OWN lair (any resident/roaming defender)
     Creature enemy = world.findNearestEnemyCarnivore(
@@ -298,10 +238,10 @@ class Creature {
     PVector nearestPlant = world.findNearestPlantOutsideLairs(
       position, lifecycle.detectionRange * (1 + lifecycle.hunger));
 
-    // Avoid all lairs
+    // Avoid all lairs but can venture into edges for plants
     for (int i = 0; i < 2; i++) {
       if (PVector.dist(position, world.lairCenters[i]) <=
-          world.lairRadius - 2.5) {
+          world.lairRadius - 5) {
         state = "AVOID_LAIR";
         flee(world.lairCenters[i]);
         return;
@@ -382,12 +322,7 @@ class Creature {
         // Tint by allegiance
         color lo = (lairIndex == 0) ? world.lairColorLow[0]  : world.lairColorLow[1];
         color hi = (lairIndex == 0) ? world.lairColorHigh[0] : world.lairColorHigh[1];
-        if (state.equals("GUARD")) {
-          // Guards are bright white-ish
-          fill(lerpColor(color(160), color(255), t));
-        } else {
-          fill(lerpColor(lo, hi, t));
-        }
+        fill(lerpColor(lo, hi, t));
       } else {
         fill(lerpColor(color(30, 50, 120), color(80, 140, 255), t));
       }

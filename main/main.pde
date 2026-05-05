@@ -11,7 +11,7 @@ void setup() {
   int worldWidth = 200;
   int worldHeight = 200;
   int gridSize = 8;
-  int initHerbivore = 70;
+  int initHerbivore = 60;
   int initCarnivore = 30;
   int initPlant = 120;
   int cameraWidth = 100;
